@@ -63,3 +63,5 @@ postgres_data/
 # ===== Logs =====
 *.log
 logs/
+!logs/.gitkeep
+

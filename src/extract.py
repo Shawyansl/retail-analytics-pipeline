@@ -7,16 +7,15 @@ import logging
 import os
 import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("../logs/extract.log", mode="a")
-    ]
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.FileHandler("./logs/extract.log")
+formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)-8s | %(message)s"
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.propagate = False
 
 REQUIRED_COLUMNS = [
     "sale_id",
@@ -73,6 +72,7 @@ def extract_data(file_path:str):
     n_rows, n_cols = df.shape
     logger.info(f"Row count: {n_rows:,}")
     logger.info(f"Column count: {n_cols}")
+    
     null_counts = df.isnull().sum()
     columns_with_nulls = null_counts[null_counts > 0]
     if columns_with_nulls.empty:
