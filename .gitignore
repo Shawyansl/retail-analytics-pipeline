@@ -64,4 +64,3 @@ postgres_data/
 *.log
 logs/
 !logs/.gitkeep
-
