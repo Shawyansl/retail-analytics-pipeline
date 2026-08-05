@@ -51,7 +51,7 @@ def extract_data(file_path:str):
         raise FileNotFoundError(f"Input file not found: {file_path}")
 
     try:
-        df = pd.read_csv(file_path)
+        df = pd.read_csv(file_path, dtype={"customer_phone": str})
 
     except Exception as e:
         logger.error(f"Failed to read CSV file: {e}")

@@ -46,6 +46,8 @@ def strip_whitespace_from_text_columns(df:pd.DataFrame) -> pd.DataFrame:
     return df
 
 def normalize_city_category_names(df:pd.DataFrame) -> pd.DataFrame:
+    if 'product_name' in df.columns:
+        df['product_name'] = df['product_name'].str.title()
     if 'customer_city' in df.columns:
         df['customer_city'] = df['customer_city'].str.title()
     if 'branch_city' in df.columns:
