@@ -106,7 +106,13 @@ def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-
+    """
+    NOTE: unlike the initial plan (which split quarantine logic between
+    transform.py and quality.py per the project spec), this project
+    consolidates all row-level rejection rules here in transform.py
+    for simplicity. quality.py will focus on cross-table checks
+    (foreign key validity, dimension uniqueness) instead.
+    """
     rules = {
         "invalid_sale_date": df['sale_date'].isna(),
         "discount_out_of_range": (df['discount_percent'] < 0) | (df['discount_percent'] > 100),
@@ -247,6 +253,52 @@ def fill_missing_product_prices(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def calculate_sales_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    df["gross_revenue"] = df["quantity"] * df["unit_price"]
+    df["discount_amount"] = df["gross_revenue"] * (df["discount_percent"] / 100)
+    df["net_revenue"] = df["gross_revenue"] - df["discount_amount"]
+    df["gross_profit"] = df["net_revenue"] - (df["quantity"] * df["unit_cost"])
+    df["margin_percent"] = np.where(
+        df["net_revenue"] != 0,
+        (df["gross_profit"] / df["net_revenue"]) * 100,
+        np.nan
+    )
+
+    metric_columns = [
+        "gross_revenue",
+        "discount_amount",
+        "net_revenue",
+        "gross_profit",
+        "margin_percent",
+    ]
+    df[metric_columns] = df[metric_columns].round(2)
+
+    n_incomplete = int(df[metric_columns].isna().any(axis=1).sum())
+    if n_incomplete > 0:
+        logger.warning(
+            f"metrics: {n_incomplete} row(s) have NaN in a derived column "
+            "-> price repair left a gap, downstream sums will silently undercount"
+        )
+    else:
+        logger.info("metrics: all derived columns computed, no NaN rows")
+
+    total_gross = df["gross_revenue"].sum()
+    total_net = df["net_revenue"].sum()
+    total_profit = df["gross_profit"].sum()
+
+    logger.info(
+        "metrics totals: "
+        f"gross_revenue={total_gross:,.2f}, "
+        f"discount_amount={df['discount_amount'].sum():,.2f}, "
+        f"net_revenue={total_net:,.2f}, "
+        f"gross_profit={total_profit:,.2f}, "
+        f"overall_margin_percent={total_profit / total_net * 100:,.2f}"
+    )
+
+    return df
+
+
+
 """
 This is main transformation function that applies all the transformations to the DataFrame.
 """
@@ -265,6 +317,7 @@ def transform_data(df:pd.DataFrame) -> pd.DataFrame:
 
     clean_df = fix_negative_prices(clean_df)
     clean_df = fill_missing_product_prices(clean_df)
+    clean_df = calculate_sales_metrics(clean_df)
 
     logger.info("Transformation completed successfully.")
 
