@@ -46,6 +46,10 @@ def strip_whitespace_from_text_columns(df:pd.DataFrame) -> pd.DataFrame:
     return df
 
 def normalize_city_category_names(df:pd.DataFrame) -> pd.DataFrame:
+    if 'payment_method' in df.columns:
+        df['payment_method'] = df['payment_method'].str.lower()
+    if 'product_name' in df.columns:
+        df['product_name'] = df['product_name'].str.title()
     if 'customer_city' in df.columns:
         df['customer_city'] = df['customer_city'].str.title()
     if 'branch_city' in df.columns:
@@ -106,12 +110,19 @@ def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-
+    """
+    NOTE: unlike the initial plan (which split quarantine logic between
+    transform.py and quality.py per the project spec), this project
+    consolidates all row-level rejection rules here in transform.py
+    for simplicity. quality.py will focus on cross-table checks
+    (foreign key validity, dimension uniqueness) instead.
+    """
     rules = {
         "invalid_sale_date": df['sale_date'].isna(),
         "discount_out_of_range": (df['discount_percent'] < 0) | (df['discount_percent'] > 100),
         "invalid_quantity": df['quantity'] <= 0,
-        "duplicate_sale_id": df['sale_id'].duplicated(keep=False)
+        "duplicate_sale_id": df['sale_id'].duplicated(keep=False),
+        "invalid_stock_quantity": df['stock_quantity'] < 0,
     }
 
     invalid_mask = pd.Series(False, index=df.index)
@@ -158,7 +169,29 @@ def resolve_customer_email_conflicts(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def resolve_customer_phone_conflicts(df: pd.DataFrame) -> pd.DataFrame:
 
+    before_null = df['customer_phone'].isna().sum()
+
+    # For each customer_id, get one non-null phone value if one exists
+    known_phone = (
+        df.dropna(subset=['customer_phone'])
+        .drop_duplicates(subset=['customer_id'])
+        .set_index('customer_id')['customer_phone']
+    )
+
+    missing_mask = df['customer_phone'].isna()
+    df.loc[missing_mask, 'customer_phone'] = df.loc[missing_mask, 'customer_id'].map(known_phone)
+
+    after_null = df['customer_phone'].isna().sum()
+
+    logger.info(
+        f"customer_phone: filled {before_null - after_null} row(s) from another "
+        f"row of the same customer_id; {after_null} row(s) remain null "
+        f"(no valid phone found anywhere for that customer)."
+    )
+
+    return df
 def generate_category_keys(df: pd.DataFrame) -> pd.DataFrame:
 
     unique_categories = sorted(df['category_name'].dropna().unique())
@@ -247,12 +280,218 @@ def fill_missing_product_prices(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def calculate_sales_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    df["gross_revenue"] = df["quantity"] * df["unit_price"]
+    df["discount_amount"] = df["gross_revenue"] * (df["discount_percent"] / 100)
+    df["net_revenue"] = df["gross_revenue"] - df["discount_amount"]
+    df["gross_profit"] = df["net_revenue"] - (df["quantity"] * df["unit_cost"])
+    df["margin_percent"] = np.where(
+        df["net_revenue"] != 0,
+        (df["gross_profit"] / df["net_revenue"]) * 100,
+        np.nan
+    )
+
+    metric_columns = [
+        "gross_revenue",
+        "discount_amount",
+        "net_revenue",
+        "gross_profit",
+        "margin_percent",
+    ]
+    df[metric_columns] = df[metric_columns].round(2)
+
+    n_incomplete = int(df[metric_columns].isna().any(axis=1).sum())
+    if n_incomplete > 0:
+        logger.warning(
+            f"metrics: {n_incomplete} row(s) have NaN in a derived column "
+            "-> price repair left a gap, downstream sums will silently undercount"
+        )
+    else:
+        logger.info("metrics: all derived columns computed, no NaN rows")
+
+    total_gross = df["gross_revenue"].sum()
+    total_net = df["net_revenue"].sum()
+    total_profit = df["gross_profit"].sum()
+
+    logger.info(
+        "metrics totals: "
+        f"gross_revenue={total_gross:,.2f}, "
+        f"discount_amount={df['discount_amount'].sum():,.2f}, "
+        f"net_revenue={total_net:,.2f}, "
+        f"gross_profit={total_profit:,.2f}, "
+        f"overall_margin_percent={total_profit / total_net * 100:,.2f}"
+    )
+
+    return df
+
+
+def split_into_dimensions_and_facts(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+
+    # -- dim_customers --
+    #   customer_id, first_name, last_name, email, phone, city, signup_date
+    dim_customers = (
+        df[
+            [
+                "customer_id",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_email",
+                "customer_phone",
+                "customer_city",
+                "customer_signup_date",
+            ]
+        ]
+        .drop_duplicates()
+        .rename(
+            columns={
+                "customer_first_name": "first_name",
+                "customer_last_name": "last_name",
+                "customer_email": "email",
+                "customer_phone": "phone",
+                "customer_city": "city",
+                "customer_signup_date": "signup_date",
+            }
+        )
+        .sort_values("customer_id")
+        .reset_index(drop=True)
+    )
+    # -- dim_categories --
+    #   category_id, category_name (category_id already built by
+    #   generate_category_keys; nothing else to do)
+    dim_categories = (
+        df[["category_id", "category_name"]]
+        .drop_duplicates()
+        .sort_values("category_id")
+        .reset_index(drop=True)
+    )
+
+    # -- dim_products --
+    #   product_id, product_name, category_id, unit_cost, unit_price
+    #   Links to dim_categories via category_id, NOT category_name --
+    #   the DDL has a foreign key on it.
+    dim_products = (
+        df[
+            [
+                "product_id",
+                "product_name",
+                "category_id",
+                "unit_cost",
+                "unit_price",
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values("product_id")
+        .reset_index(drop=True)
+    )
+
+    # -- dim_branches --
+    #   branch_id, branch_name, branch_city, sales_channel
+    dim_branches = (
+        df[
+            [
+                "branch_id",
+                "branch_name",
+                "branch_city",
+                "sales_channel",
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values("branch_id")
+        .reset_index(drop=True)
+    )
+
+    # -- fact_sales (one row per sale) --
+    #   sale_id, sale_date, customer_id, product_id, branch_id, quantity,
+    #   discount_percent, payment_method, and the 5 metric columns.
+    #   sale_id is already unique (quarantine_invalid_sales dropped the dupes).
+    fact_sales = (
+        df[
+            [
+                "sale_id",
+                "sale_date",
+                "customer_id",
+                "product_id",
+                "branch_id",
+                "quantity",
+                "discount_percent",
+                "payment_method",
+                "gross_revenue",
+                "discount_amount",
+                "net_revenue",
+                "gross_profit",
+                "margin_percent",
+            ]
+        ]
+        .sort_values("sale_id")
+        .reset_index(drop=True)
+    )
+
+
+    inventory_keys = ["inventory_snapshot_date", "product_id", "branch_id"]
+    inventory = df[inventory_keys + ["sale_date", "sale_id", "stock_quantity", "reorder_level"]]
+
+    # groupby silently drops rows with a NaN/NaT key, so count them before it happens
+    n_unkeyed = int(inventory[inventory_keys].isna().any(axis=1).sum())
+    if n_unkeyed > 0:
+        logger.warning(
+            f"fact_inventory_snapshot: dropping {n_unkeyed} row(s) with a missing "
+            "snapshot_date/product_id/branch_id -- cannot be keyed"
+        )
+        
+        inventory = inventory.dropna(subset=inventory_keys)
+
+    inventory = inventory.sort_values(["sale_date", "sale_id"])
+
+    rows_before = len(inventory)
+    inventory = (
+        inventory
+        .groupby(inventory_keys, as_index=False)[["stock_quantity", "reorder_level"]]
+        .last()
+    )
+    inventory[["stock_quantity", "reorder_level"]] = (
+        inventory[["stock_quantity", "reorder_level"]].round().astype("Int64")
+    )
+    logger.info(
+        f"fact_inventory_snapshot: collapsed {rows_before - len(inventory)} "
+        f"conflicting row(s) into {len(inventory)} unique triples "
+        f"(kept the row with the latest sale_date/sale_id per triple)"
+    )
+
+    fact_inventory_snapshot = (
+        inventory
+        .rename(columns={"inventory_snapshot_date": "snapshot_date"})
+        .sort_values(["snapshot_date", "product_id", "branch_id"])
+        .reset_index(drop=True)
+    )
+
+    tables = {
+        "dim_customers": dim_customers,
+        "dim_categories": dim_categories,
+        "dim_products": dim_products,
+        "dim_branches": dim_branches,
+        "fact_sales": fact_sales,
+        "fact_inventory_snapshot": fact_inventory_snapshot,
+    }
+
+    n_dup_sale_ids = int(fact_sales["sale_id"].duplicated().sum())
+    if n_dup_sale_ids > 0:
+        logger.error(
+            f"fact_sales: {n_dup_sale_ids} duplicate sale_id(s) survived quarantine "
+            "-> PRIMARY KEY violation on load"
+        )
+
+    for table_name, table_df in tables.items():
+        logger.info(f"{table_name}: {len(table_df)} rows, {len(table_df.columns)} columns")
+
+    return tables
+
+
 """
 This is main transformation function that applies all the transformations to the DataFrame.
 """
 
 
-def transform_data(df:pd.DataFrame) -> pd.DataFrame:
+def transform_data(df:pd.DataFrame) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     df = standardize_column_names(df)
     df = strip_whitespace_from_text_columns(df)
     df = normalize_city_category_names(df)
@@ -261,11 +500,15 @@ def transform_data(df:pd.DataFrame) -> pd.DataFrame:
 
     clean_df, rejected_df = quarantine_invalid_sales(df)
     clean_df = resolve_customer_email_conflicts(clean_df)
+    clean_df = resolve_customer_phone_conflicts(clean_df)
     clean_df = generate_category_keys(clean_df)
 
     clean_df = fix_negative_prices(clean_df)
     clean_df = fill_missing_product_prices(clean_df)
+    clean_df = calculate_sales_metrics(clean_df)
+
+    tables = split_into_dimensions_and_facts(clean_df)
 
     logger.info("Transformation completed successfully.")
 
-    return clean_df, rejected_df
+    return tables, rejected_df
