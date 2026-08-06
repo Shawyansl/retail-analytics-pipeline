@@ -355,7 +355,6 @@ def split_into_dimensions_and_facts(df: pd.DataFrame) -> dict[str, pd.DataFrame]
         .sort_values("customer_id")
         .reset_index(drop=True)
     )
-
     # -- dim_categories --
     #   category_id, category_name (category_id already built by
     #   generate_category_keys; nothing else to do)
@@ -427,24 +426,7 @@ def split_into_dimensions_and_facts(df: pd.DataFrame) -> dict[str, pd.DataFrame]
         .reset_index(drop=True)
     )
 
-    # -- fact_inventory_snapshot --
-    #   snapshot_date, product_id, branch_id, stock_quantity, reorder_level
-    #   The DDL has UNIQUE (snapshot_date, product_id, branch_id), so this
-    #   frame MUST be one row per that triple. Raw data does not respect
-    #   that -- multiple sales rows can share the same triple, each carrying
-    #   a different stock_quantity (inventory decreases as sales happen).
-    #
-    #   Strategy: keep the LAST reported value per triple, approximating
-    #   "the end-of-day snapshot" -- this matters for the downstream
-    #   Stockout Risk report, where the current/latest stock level is what's
-    #   actionable, not a statistical average across the day.
-    #
-    #   sale_id in this dataset is NOT chronological (verified separately:
-    #   sorting by sale_id does not yield increasing sale_date), so we sort
-    #   by sale_date first, then use sale_id only as a deterministic
-    #   tie-breaker for same-day rows. The raw data has no time-of-day
-    #   precision, so this is the best approximation available -- not a
-    #   guaranteed-accurate "true last" value.
+
     inventory_keys = ["inventory_snapshot_date", "product_id", "branch_id"]
     inventory = df[inventory_keys + ["sale_date", "sale_id", "stock_quantity", "reorder_level"]]
 
@@ -455,6 +437,7 @@ def split_into_dimensions_and_facts(df: pd.DataFrame) -> dict[str, pd.DataFrame]
             f"fact_inventory_snapshot: dropping {n_unkeyed} row(s) with a missing "
             "snapshot_date/product_id/branch_id -- cannot be keyed"
         )
+        
         inventory = inventory.dropna(subset=inventory_keys)
 
     inventory = inventory.sort_values(["sale_date", "sale_id"])
@@ -508,7 +491,7 @@ This is main transformation function that applies all the transformations to the
 """
 
 
-def transform_data(df:pd.DataFrame) -> pd.DataFrame:
+def transform_data(df:pd.DataFrame) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     df = standardize_column_names(df)
     df = strip_whitespace_from_text_columns(df)
     df = normalize_city_category_names(df)
