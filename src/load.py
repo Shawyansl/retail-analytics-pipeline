@@ -59,7 +59,7 @@ def load_table(conn, table_name: str, df: pd.DataFrame) -> None:
 
 
 
-def save_rejected(rejected_df: pd.DataFrame, path: str = "./reports/rejected_records.csv") -> None:
+def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/raw/rejected_records.csv") -> None:
 
     if rejected_df.empty:
         logger.info("No rejected records to save.")
