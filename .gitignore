@@ -27,10 +27,10 @@ ENV/
 .venv/
 
 # ===== Environment variables / Secrets =====
-.env
-.env.local
-*.env
-config/secrets.*
+#.env
+#.env.local
+#*.env
+#config/secrets.*
 
 # ===== Data files (raw & processed - never commit actual data) =====
 data/raw/*
