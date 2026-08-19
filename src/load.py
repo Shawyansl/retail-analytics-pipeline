@@ -7,6 +7,8 @@ import logging
 import pandas as pd
 import psycopg2
 from config import get_db_config
+from io import StringIO
+from time import perf_counter
 
 
 logger = logging.getLogger(__name__)
@@ -36,26 +38,82 @@ def get_connection(config: dict):
         raise
 
 
+CHUNK_SIZE = 100_000
+
+
 def load_table(conn, table_name: str, df: pd.DataFrame) -> None:
-    # TODO: insert all rows from df into table_name using INSERT ... ON CONFLICT DO NOTHING
-    #
-    # Steps:
-    #   1. Build the column list from df.columns  ->  e.g. "col1, col2, col3"
-    #   2. Build the placeholders string          ->  e.g. "%s, %s, %s"  (one %s per column)
-    #   3. Build the SQL string:
-    #        INSERT INTO {table_name} ({cols}) VALUES ({placeholders}) ON CONFLICT DO NOTHING
-    #   4. Convert df to a list of tuples: df.where(pd.notnull(df), None).values.tolist()
-    #      (the .where(..., None) converts NaN/NaT to Python None so psycopg2 writes NULL)
-    #   5. Open a cursor, call cursor.executemany(sql, rows), then conn.commit()
-    #   6. Log how many rows were attempted
-    table_cols = ", ".join(df.columns)
-    placeholders = ", ".join(["%s"] * len(df.columns))
-    sql = f"INSERT INTO {table_name} ({table_cols}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
-    rows = df.where(pd.notnull(df), None).values.tolist()
-    with conn.cursor() as cursor:
-        cursor.executemany(sql, rows)
-        conn.commit()
-    logger.info(f"Attempted to load {len(rows)} rows into {table_name}.")
+    """
+    Bulk-load df into table_name via  COPY -> TEMP staging -> INSERT ... SELECT.
+
+    The staging table deliberately carries no constraints, no indexes and no defaults,
+    so the per-row cost of unique-index probes and FK checks is deferred to the single
+    set-at-a-time INSERT ... SELECT at the end instead of being paid a million times.
+
+    All tables are loaded in the transaction managed by load_data(). The staging table
+    is created with ON COMMIT DROP and is removed after the final commit or rollback.
+
+    Replaces an executemany() loop that ran at ~2,360 rows/s on fact_sales
+    (997,968 rows / 423 s) and ~1,370 rows/s on fact_inventory_snapshot
+    (975,478 rows / 713 s), measured 2026-08-19.
+    """
+    if df.empty:
+        logger.warning(
+            f"{table_name}: received an empty DataFrame -- nothing to load. "
+            "Something upstream probably went wrong."
+        )
+        return
+
+    started = perf_counter()
+
+    # Build the column list once and reuse it for COPY and for INSERT ... SELECT, so the
+    # two sides can never drift out of order. Quoted to survive any odd identifier.
+    column_sql = ", ".join(f'"{column}"' for column in df.columns)
+    staging_table = f"stg_{table_name}"
+
+    with conn.cursor() as cur:
+        # CTAS with WITH NO DATA copies column names and types only -- no PK, no FK, no
+        # UNIQUE, no NOT NULL, no SERIAL default. Note this also means the `id` column of
+        # fact_inventory_snapshot is simply absent here, because df does not carry it.
+        cur.execute(
+            f'CREATE TEMP TABLE "{staging_table}" ON COMMIT DROP AS '
+            f'SELECT {column_sql} FROM "{table_name}" WITH NO DATA'
+        )
+
+        # FORMAT CSV lets pandas do the quoting/escaping. NULL '' matches to_csv's
+        # na_rep="" so NaN / NaT / pd.NA all arrive as real SQL NULL.
+        copy_sql = (
+            f'COPY "{staging_table}" ({column_sql}) '
+            f"FROM STDIN WITH (FORMAT CSV, NULL '')"
+        )
+
+        # Chunked so we never hold the whole table as one giant Python string.
+        for start in range(0, len(df), CHUNK_SIZE):
+            buffer = StringIO()
+            df.iloc[start:start + CHUNK_SIZE].to_csv(
+                buffer, index=False, header=False, na_rep=""
+            )
+            buffer.seek(0)
+            cur.copy_expert(copy_sql, buffer)
+
+        cur.execute(
+            f'INSERT INTO "{table_name}" ({column_sql}) '
+            f'SELECT {column_sql} FROM "{staging_table}" '
+            "ON CONFLICT DO NOTHING"
+        )
+        # For INSERT ... ON CONFLICT DO NOTHING, rowcount is the number of rows that were
+        # actually written -- conflicting rows are not counted. This is the only honest
+        # source for "how many landed".
+        inserted = cur.rowcount
+
+
+    elapsed = perf_counter() - started
+    skipped = len(df) - inserted
+    rate = len(df) / elapsed if elapsed > 0 else 0.0
+    logger.info(
+        f"{table_name}: staged {len(df):,} row(s), inserted {inserted:,}, "
+        f"skipped {skipped:,} on conflict, in {elapsed:.2f}s "
+        f"({rate:,.0f} rows/s); awaiting final commit."
+    )
 
 
 
@@ -76,7 +134,15 @@ def load_data(tables: dict, rejected_df: pd.DataFrame, all_rejected_df: pd.DataF
     try:
         for table_name in LOAD_ORDER:
             load_table(conn, table_name, tables[table_name])
+
+        conn.commit()
+        logger.info("All tables committed successfully.")
+
+    except Exception:
+        conn.rollback()
+        logger.exception("Load failed; all database changes were rolled back.")
+        raise
+
     finally:
         conn.close()
         logger.info("Database connection closed.")
-
