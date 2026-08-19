@@ -13,4 +13,4 @@ COPY . .
 
 RUN mkdir -p logs data/processed/rejected_records reports/charts
 
-CMD ["python", "main.py"]
+CMD ["python", "src/main.py"]

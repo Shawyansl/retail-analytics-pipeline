@@ -6,7 +6,7 @@ Loads transformed tables into PostgreSQL and saves rejected records to CSV.
 import logging
 import pandas as pd
 import psycopg2
-from src.config import get_db_config
+from config import get_db_config
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def load_table(conn, table_name: str, df: pd.DataFrame) -> None:
 
 
 
-def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/raw/rejected_records.csv") -> None:
+def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/processed/rejected_records/rejected_records.csv") -> None:
 
     if rejected_df.empty:
         logger.info("No rejected records to save.")
@@ -68,10 +68,10 @@ def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/raw/rejected_re
         logger.info(f"Saved {len(rejected_df)} rejected records to {path}.")
 
 
-def load_data(tables: dict, rejected_df: pd.DataFrame, all_rejected_df: pd.DataFrame) -> None:
+def load_data(tables: dict, rejected_df: pd.DataFrame, all_rejected_df: pd.DataFrame, load_path1, load_path2) -> None:
 
-    save_rejected(rejected_df)
-    save_rejected(all_rejected_df, "./data/raw/quality_rejected_records.csv")
+    save_rejected(rejected_df, load_path1)
+    save_rejected(all_rejected_df, load_path2)
     conn = get_connection(get_db_config())
     try:
         for table_name in LOAD_ORDER:
