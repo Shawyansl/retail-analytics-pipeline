@@ -39,14 +39,27 @@ def check_dimension_uniqueness(tables: dict) -> tuple[list[dict], pd.DataFrame]:
 
         results.append(my_dict)
 
-        bad_mask = df[pk_col].duplicated(keep=False)
-        if bad_mask.any():
-            rejected_df = df.loc[bad_mask].copy()
+        # keep="first": drop only the surplus copies, never the whole key. A dimension row
+        #t duplicates when a descriptive attribute drifts across the source rows for one id
+        # (a product's unit_price changes, a customer moves ciy) -- dropping every copy
+        # would delete the key from the dimension, and check_foreign_keys would then delete
+        # every fact row that references it. Losing an attribute revision is recoverable;
+        # losing the entity plus all its facts is not.
+        surplus_mask = df[pk_col].duplicated(keep="first")
+        if surplus_mask.any():
+            rejected_df = df.loc[surplus_mask].copy()
             rejected_df["table_name"] = table_name
-            rejected_df["issue"] = f"Duplicate values found in {pk_col}"
+            rejected_df["issue"] = (
+                f"Surplus row for duplicate {pk_col}; kept the first occurrence"
+            )
             rejected.append(rejected_df)
+            logger.warning(
+                f"{table_name}: kept the first row for {n_issues} duplicated {pk_col}(s) "
+                f"and quarantined {int(surplus_mask.sum())} surplus row(s); the key itself "
+                "stays in the dimension so its facts survive."
+            )
 
-        tables[table_name] = df.loc[~bad_mask].copy()
+        tables[table_name] = df.loc[~surplus_mask].copy()
 
     rejected_df = pd.concat(rejected, ignore_index=True) if rejected else pd.DataFrame()
 
@@ -79,14 +92,25 @@ def check_fact_pk(tables: dict) -> tuple[list[dict], pd.DataFrame]:
 
         results.append(my_dict)
 
-        bad_mask = df.duplicated(subset=pk_cols, keep=False)
-        if bad_mask.any():
-            rejected_df = df.loc[bad_mask].copy()
+        # keep="first" here as well, but for a different reason than the dimensions above:
+        # a fact row IS the measurement, so dropping every copy of a duplicated sale_id
+        # discards a real sale on top of the bogus one. transform.quarantine_invalid_sales
+        # already rejects genuinely ambiguous duplicate sale_ids with both copies; anything
+        # still duplicated at this point is a survivor worth keeping one of.
+        surplus_mask = df.duplicated(subset=pk_cols, keep="first")
+        if surplus_mask.any():
+            rejected_df = df.loc[surplus_mask].copy()
             rejected_df["table_name"] = table_name
-            rejected_df["issue"] = f"Duplicate values found in {', '.join(pk_cols)}"
+            rejected_df["issue"] = (
+                f"Surplus row for duplicate {', '.join(pk_cols)}; kept the first occurrence"
+            )
             rejected.append(rejected_df)
+            logger.warning(
+                f"{table_name}: quarantined {int(surplus_mask.sum())} surplus row(s) for "
+                f"{n_issues} duplicated key(s); kept the first occurrence of each."
+            )
 
-        tables[table_name] = df.loc[~bad_mask].copy()
+        tables[table_name] = df.loc[~surplus_mask].copy()
 
     rejected_df = pd.concat(rejected, ignore_index=True) if rejected else pd.DataFrame()
 

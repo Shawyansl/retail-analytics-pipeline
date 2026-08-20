@@ -41,39 +41,29 @@ def get_connection(config: dict):
 CHUNK_SIZE = 100_000
 
 
+def truncate_tables(conn) -> None:
+    table_sql = ", ".join(f'"{table_name}"' for table_name in LOAD_ORDER)
+
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE TABLE {table_sql} RESTART IDENTITY")
+
+    logger.info(
+        f"Truncated {len(LOAD_ORDER)} table(s) in this transaction; "
+        "the previous run's rows are gone unless this transaction rolls back."
+    )
+
 def load_table(conn, table_name: str, df: pd.DataFrame) -> None:
-    """
-    Bulk-load df into table_name via  COPY -> TEMP staging -> INSERT ... SELECT.
-
-    The staging table deliberately carries no constraints, no indexes and no defaults,
-    so the per-row cost of unique-index probes and FK checks is deferred to the single
-    set-at-a-time INSERT ... SELECT at the end instead of being paid a million times.
-
-    All tables are loaded in the transaction managed by load_data(). The staging table
-    is created with ON COMMIT DROP and is removed after the final commit or rollback.
-
-    Replaces an executemany() loop that ran at ~2,360 rows/s on fact_sales
-    (997,968 rows / 423 s) and ~1,370 rows/s on fact_inventory_snapshot
-    (975,478 rows / 713 s), measured 2026-08-19.
-    """
     if df.empty:
-        logger.warning(
-            f"{table_name}: received an empty DataFrame -- nothing to load. "
-            "Something upstream probably went wrong."
+        raise ValueError(
+            f"{table_name}: received an empty DataFrame. The table was truncated at the "
+            "start of this transaction, so continuing would publish an empty table."
         )
-        return
 
     started = perf_counter()
-
-    # Build the column list once and reuse it for COPY and for INSERT ... SELECT, so the
-    # two sides can never drift out of order. Quoted to survive any odd identifier.
     column_sql = ", ".join(f'"{column}"' for column in df.columns)
     staging_table = f"stg_{table_name}"
 
     with conn.cursor() as cur:
-        # CTAS with WITH NO DATA copies column names and types only -- no PK, no FK, no
-        # UNIQUE, no NOT NULL, no SERIAL default. Note this also means the `id` column of
-        # fact_inventory_snapshot is simply absent here, because df does not carry it.
         cur.execute(
             f'CREATE TEMP TABLE "{staging_table}" ON COMMIT DROP AS '
             f'SELECT {column_sql} FROM "{table_name}" WITH NO DATA'
@@ -115,6 +105,13 @@ def load_table(conn, table_name: str, df: pd.DataFrame) -> None:
         f"({rate:,.0f} rows/s); awaiting final commit."
     )
 
+    if skipped:
+        logger.warning(
+            f"{table_name}: {skipped:,} row(s) skipped on conflict even though the table "
+            "was truncated at the start of this transaction -- the DataFrame carries "
+            "duplicate keys that the quality checks did not remove."
+        )
+
 
 
 def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/processed/rejected_records/rejected_records.csv") -> None:
@@ -132,6 +129,9 @@ def load_data(tables: dict, rejected_df: pd.DataFrame, all_rejected_df: pd.DataF
     save_rejected(all_rejected_df, load_path2)
     conn = get_connection(get_db_config())
     try:
+        # Same transaction as the loads below, so a failure anywhere restores the old rows.
+        truncate_tables(conn)
+
         for table_name in LOAD_ORDER:
             load_table(conn, table_name, tables[table_name])
 

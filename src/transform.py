@@ -116,12 +116,21 @@ def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     consolidates all row-level rejection rules here in transform.py
     for simplicity. quality.py will focus on cross-table checks
     (foreign key validity, dimension uniqueness) instead.
+    NaN is spelled out in every numeric rule on purpose. A comparison against NaN is
+    False, so `df['quantity'] <= 0` lets a null quantity through -- and the DDL declares
+    `quantity INT NOT NULL CHECK (quantity > 0)`. ON CONFLICT DO NOTHING only absorbs
+    unique-constraint violations, not NOT NULL or CHECK, so one null here aborts the
+    whole million-row load at the very end.
     """
     rules = {
         "invalid_sale_date": df['sale_date'].isna(),
+        "missing_discount": df['discount_percent'].isna(),
         "discount_out_of_range": (df['discount_percent'] < 0) | (df['discount_percent'] > 100),
+        "missing_quantity": df['quantity'].isna(),
         "invalid_quantity": df['quantity'] <= 0,
         "duplicate_sale_id": df['sale_id'].duplicated(keep=False),
+        "missing_sale_id": df['sale_id'].isna(),
+        "missing_stock_quantity": df['stock_quantity'].isna(),
         "invalid_stock_quantity": df['stock_quantity'] < 0,
     }
 
@@ -133,15 +142,28 @@ def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     rejected_df = df.loc[invalid_mask].copy()
     clean_df = df.loc[~invalid_mask].copy()
 
-    rejected_df['rejection_reason'] = None
+    # A row can break several rules at once, and a single overwritten column would report
+    # only whichever rule happens to come last in `rules`. Join them so the CSV shows the
+    # full reason, and keep a count so the per-reason numbers below stay reconcilable.
+    reason_parts = pd.Series("", index=rejected_df.index)
     for rule_name, rule_mask in rules.items():
-        rejected_df.loc[rule_mask, 'rejection_reason'] = rule_name
+        hits = rule_mask.reindex(rejected_df.index, fill_value=False)
+        reason_parts[hits] = reason_parts[hits] + f"{rule_name};"
 
+    rejected_df['rejection_reason'] = reason_parts.str.rstrip(";")
 
     logger.info("Rejected sales summary:")
 
+    # Counted over rejected_df, not df: these are the rows actually removed. Because a row
+    # can appear under more than one reason, the numbers below can sum to more than the
+    # total -- that is overlap, not double-rejection.
     for reason, mask in rules.items():
-        logger.info(f"{reason}: {int(mask.sum())}")
+        n_hit = int(mask.reindex(rejected_df.index, fill_value=False).sum())
+        logger.info(f"{reason}: {n_hit}")
+
+    n_multi = int(rejected_df['rejection_reason'].str.contains(";").sum())
+    if n_multi > 0:
+        logger.info(f"({n_multi} of the rejected rows broke more than one rule)")
 
     logger.info(f"Total rejected: {len(rejected_df)}")
     logger.info(f"Remaining clean rows: {len(clean_df)}")

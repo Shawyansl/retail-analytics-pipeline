@@ -36,9 +36,13 @@ ENV/
 data/raw/*
 !data/raw/.gitkeep
 
+# Keep the rejected_records/ subdirectory itself: load.py writes into it and cannot
+# create it, so a fresh clone crashes without the .gitkeep. Note the pattern is
+# `data/processed/*` and not `data/processed/`: a bare directory pattern stops git from
+# descending into it at all, which makes any later `!` negation unreachable.
 data/processed/*
 !data/processed/.gitkeep
-
+!data/processed/rejected_records/
 data/processed/rejected_records/*
 !data/processed/rejected_records/.gitkeep
 
@@ -61,6 +65,7 @@ postgres_data/
 .ipynb_checkpoints/
 
 # ===== Logs =====
-*.log
-logs/
+# `logs/*` rather than `logs/`, same reason as data/processed above -- the .gitkeep has to
+# stay tracked or the FileHandler in every module raises on import in a fresh clone.
+logs/*
 !logs/.gitkeep
