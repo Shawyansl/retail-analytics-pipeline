@@ -1,9 +1,11 @@
 """
 load.py
 
-Loads transformed tables into PostgreSQL and saves rejected records to CSV.
+Loads transformed tables into PostgreSQL, writes the normalized dimension and
+fact tables to data/processed/ as CSV, and saves rejected records to CSV.
 """
 import logging
+import os
 import pandas as pd
 import psycopg2
 from config import get_db_config
@@ -114,6 +116,59 @@ def load_table(conn, table_name: str, df: pd.DataFrame) -> None:
 
 
 
+def save_processed_tables(
+    tables: dict[str, pd.DataFrame],
+    out_dir: str = "./data/processed",
+) -> None:
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    missing = [name for name in LOAD_ORDER if name not in tables]
+    if missing:
+        raise KeyError(
+            f"save_processed_tables: no DataFrame supplied for {missing}. "
+            "All six normalized tables are required deliverables."
+        )
+
+    unexpected = [name for name in tables if name not in LOAD_ORDER]
+    if unexpected:
+        logger.warning(
+            f"save_processed_tables: ignoring unexpected table(s) {unexpected}; "
+            f"only the six tables in LOAD_ORDER are written."
+        )
+
+    total_bytes = 0
+
+    # LOAD_ORDER rather than dict order, so the log reads the same way every run.
+    for table_name in LOAD_ORDER:
+        df = tables[table_name]
+        path = os.path.join(out_dir, f"{table_name}.csv")
+
+        started = perf_counter()
+        df.to_csv(path, index=False, na_rep="", date_format="%Y-%m-%d")
+        elapsed = perf_counter() - started
+
+        size = os.path.getsize(path)
+        total_bytes += size
+
+        if df.empty:
+            # Header-only file: written on purpose so the deliverable exists and the
+            # emptiness is visible, but it means an upstream step produced nothing.
+            logger.warning(
+                f"{table_name}: wrote a header-only {path} -- the DataFrame was empty."
+            )
+        else:
+            logger.info(
+                f"{table_name}: wrote {len(df):,} row(s), {len(df.columns)} column(s) "
+                f"to {path} ({size / 1024 / 1024:.1f} MB) in {elapsed:.2f}s."
+            )
+
+    logger.info(
+        f"Wrote {len(LOAD_ORDER)} processed CSV file(s) to {out_dir} "
+        f"({total_bytes / 1024 / 1024:.1f} MB total)."
+    )
+
+
 def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/processed/rejected_records/rejected_records.csv") -> None:
 
     if rejected_df.empty:
@@ -123,8 +178,10 @@ def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/processed/rejec
         logger.info(f"Saved {len(rejected_df)} rejected records to {path}.")
 
 
-def load_data(tables: dict, rejected_df: pd.DataFrame, all_rejected_df: pd.DataFrame, load_path1, load_path2) -> None:
+def load_data(tables: dict, rejected_df: pd.DataFrame, all_rejected_df: pd.DataFrame, load_path1, load_path2,
+              processed_dir: str = "./data/processed") -> None:
 
+    save_processed_tables(tables, processed_dir)
     save_rejected(rejected_df, load_path1)
     save_rejected(all_rejected_df, load_path2)
     conn = get_connection(get_db_config())

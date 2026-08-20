@@ -171,16 +171,60 @@ def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     return clean_df, rejected_df
 
 def resolve_customer_email_conflicts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Give every customer_id a single email: the one appearing on most of its rows.
 
+    Side effect worth knowing about: because the winning email is mapped back onto
+    every row of the customer, rows whose email was null are filled in from the
+    customer's other rows. That is intentional (the same trick as
+    resolve_customer_phone_conflicts), so the count is logged rather than left silent.
+
+    A customer whose every row has a null email keeps its null -- there is no email
+    to vote for -- and does not abort the run.
+    """
     email_counts_before = df.groupby('customer_id')['customer_email'].nunique()
     n_conflicts = int((email_counts_before > 1).sum())
 
     if n_conflicts == 0:
+        # Note this fast path also skips the null-filling described above. Harmless
+        # only because no conflicts means no email disagreements to propagate.
         logger.info("No customer_id/email conflicts found.")
         return df
 
-    majority_email = df.groupby('customer_id')['customer_email'].agg(
-        lambda x: x.value_counts().idxmax() #num of repeat , return name of email that has max repeat
+    nulls_before = int(df['customer_email'].isna().sum())
+
+    # Tally votes instead of aggregating with a per-group lambda.
+    #
+    # The previous version was `.agg(lambda x: x.value_counts().idxmax())`, which
+    # raised "ValueError: attempt to get argmax of an empty sequence" for any
+    # customer_id whose every row had a null email: value_counts() drops nulls, so
+    # that group's tally is empty and idxmax() has nothing to choose. The
+    # n_conflicts guard above does not protect against it, because agg runs over
+    # every customer, not just the conflicting ones -- one all-null customer
+    # anywhere in the file killed the whole run.
+    #
+    # Dropping nulls before the groupby means such a customer never enters the
+    # tally at all; map() below then finds no key for it and leaves its email NaN.
+    # Selecting the two columns first keeps this off the full 24-column frame.
+    votes = (
+        df.loc[df['customer_email'].notna(), ['customer_id', 'customer_email']]
+        .groupby(['customer_id', 'customer_email'], sort=False)
+        .size()
+        .reset_index(name='n_rows')
+    )
+
+    # sort=False above leaves votes in order of first appearance, and mergesort is
+    # stable, so a tie is broken by whichever email was seen first in the file.
+    # The default quicksort is not stable, which would leave the winner of a tie up
+    # to sort internals -- two runs over the same input could disagree.
+    votes = votes.sort_values('n_rows', ascending=False, kind='mergesort')
+
+    tied = votes.groupby('customer_id')['n_rows'].transform('max').eq(votes['n_rows'])
+    n_tied = int((votes.loc[tied, 'customer_id'].value_counts() > 1).sum())
+
+    majority_email = (
+        votes.drop_duplicates('customer_id')
+        .set_index('customer_id')['customer_email']
     )
     df['customer_email'] = df['customer_id'].map(majority_email)
 
@@ -188,6 +232,22 @@ def resolve_customer_email_conflicts(df: pd.DataFrame) -> pd.DataFrame:
         f"Resolved {n_conflicts} customer_id(s) with conflicting emails "
         f"using majority-vote strategy."
     )
+
+    if n_tied:
+        # A tie means majority vote could not actually decide. The pick is stable
+        # but arbitrary, so say so rather than presenting it as a resolved conflict.
+        logger.warning(
+            f"{n_tied} customer_id(s) had two or more emails tied on the same row "
+            "count; kept the one seen first in the file."
+        )
+
+    nulls_after = int(df['customer_email'].isna().sum())
+    if nulls_before:
+        logger.info(
+            f"Filled {nulls_before - nulls_after} null email(s) from the same "
+            f"customer's other rows; {nulls_after} row(s) had no email anywhere "
+            "for their customer_id and stay null."
+        )
 
     return df
 

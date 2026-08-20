@@ -122,10 +122,12 @@ def check_foreign_keys(tables: dict) -> tuple[list[dict], pd.DataFrame]:
     rejected = []
 
     fk_checks = [
-        ("fact_sales",    "customer_id", "dim_customers",  "customer_id"),
-        ("fact_sales",    "product_id",  "dim_products",   "product_id"),
-        ("fact_sales",    "branch_id",   "dim_branches",   "branch_id"),
-        ("dim_products",  "category_id", "dim_categories", "category_id"),
+        ("dim_products",            "category_id", "dim_categories", "category_id"),
+        ("fact_sales",              "customer_id", "dim_customers",  "customer_id"),
+        ("fact_sales",              "product_id",  "dim_products",   "product_id"),
+        ("fact_sales",              "branch_id",   "dim_branches",   "branch_id"),
+        ("fact_inventory_snapshot", "product_id",  "dim_products",   "product_id"),
+        ("fact_inventory_snapshot", "branch_id",   "dim_branches",   "branch_id"),
     ]
 
     for left_table, fk_col, right_table, pk_col in fk_checks:
@@ -209,15 +211,47 @@ def check_null_keys(tables: dict) -> tuple[list[dict], pd.DataFrame]:
     return results, rejected_df
 
 
+def assert_referential_integrity(tables: dict) -> None:
+    edges = [
+        ("dim_products",            "category_id", "dim_categories", "category_id"),
+        ("fact_sales",              "customer_id", "dim_customers",  "customer_id"),
+        ("fact_sales",              "product_id",  "dim_products",   "product_id"),
+        ("fact_sales",              "branch_id",   "dim_branches",   "branch_id"),
+        ("fact_inventory_snapshot", "product_id",  "dim_products",   "product_id"),
+        ("fact_inventory_snapshot", "branch_id",   "dim_branches",   "branch_id"),
+    ]
+
+    problems = []
+    for left_table, fk_col, right_table, pk_col in edges:
+        valid_keys = set(tables[right_table][pk_col].dropna())
+        n_orphan = int((~tables[left_table][fk_col].isin(valid_keys)).sum())
+        if n_orphan:
+            problems.append(
+                f"{left_table}.{fk_col} -> {right_table}.{pk_col}: {n_orphan} orphan row(s)"
+            )
+
+    if problems:
+        for problem in problems:
+            logger.error(f"Referential integrity broken after all checks: {problem}")
+        raise ValueError(
+            "Refusing to load: orphan rows remain after the quality checks. "
+            + "; ".join(problems)
+        )
+
+    logger.info(
+        f"Referential integrity verified across {len(edges)} foreign-key edge(s); "
+        "no orphan rows remain."
+    )
+
+
 def run_quality_checks(tables: dict) -> tuple[dict, list[dict], pd.DataFrame]:
     results = []
     rejected = []
-
     checks = [
         check_dimension_uniqueness,
+        check_null_keys,
         check_fact_pk,
         check_foreign_keys,
-        check_null_keys,
     ]
 
     for check in checks:
@@ -228,6 +262,6 @@ def run_quality_checks(tables: dict) -> tuple[dict, list[dict], pd.DataFrame]:
 
     all_rejected_df = pd.concat(rejected, ignore_index=True) if rejected else pd.DataFrame()
 
-
+    assert_referential_integrity(tables)
 
     return tables, results, all_rejected_df
