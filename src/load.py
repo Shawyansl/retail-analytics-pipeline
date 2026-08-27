@@ -11,6 +11,7 @@ import psycopg2
 from config import get_db_config
 from io import StringIO
 from time import perf_counter
+from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
@@ -171,6 +172,11 @@ def save_processed_tables(
 
 def save_rejected(rejected_df: pd.DataFrame, path: str = "./data/processed/rejected_records/rejected_records.csv") -> None:
 
+    Path("./data/processed/rejected_records").mkdir(
+        parents=True,
+        exist_ok=True
+    )
+    
     if rejected_df.empty:
         logger.info("No rejected records to save.")
     else:
