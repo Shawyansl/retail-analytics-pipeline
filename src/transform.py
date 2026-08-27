@@ -154,9 +154,7 @@ def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
 
     logger.info("Rejected sales summary:")
 
-    # Counted over rejected_df, not df: these are the rows actually removed. Because a row
-    # can appear under more than one reason, the numbers below can sum to more than the
-    # total -- that is overlap, not double-rejection.
+
     for reason, mask in rules.items():
         n_hit = int(mask.reindex(rejected_df.index, fill_value=False).sum())
         logger.info(f"{reason}: {n_hit}")
@@ -171,41 +169,16 @@ def quarantine_invalid_sales(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     return clean_df, rejected_df
 
 def resolve_customer_email_conflicts(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Give every customer_id a single email: the one appearing on most of its rows.
 
-    Side effect worth knowing about: because the winning email is mapped back onto
-    every row of the customer, rows whose email was null are filled in from the
-    customer's other rows. That is intentional (the same trick as
-    resolve_customer_phone_conflicts), so the count is logged rather than left silent.
-
-    A customer whose every row has a null email keeps its null -- there is no email
-    to vote for -- and does not abort the run.
-    """
     email_counts_before = df.groupby('customer_id')['customer_email'].nunique()
     n_conflicts = int((email_counts_before > 1).sum())
 
     if n_conflicts == 0:
-        # Note this fast path also skips the null-filling described above. Harmless
-        # only because no conflicts means no email disagreements to propagate.
         logger.info("No customer_id/email conflicts found.")
         return df
 
     nulls_before = int(df['customer_email'].isna().sum())
 
-    # Tally votes instead of aggregating with a per-group lambda.
-    #
-    # The previous version was `.agg(lambda x: x.value_counts().idxmax())`, which
-    # raised "ValueError: attempt to get argmax of an empty sequence" for any
-    # customer_id whose every row had a null email: value_counts() drops nulls, so
-    # that group's tally is empty and idxmax() has nothing to choose. The
-    # n_conflicts guard above does not protect against it, because agg runs over
-    # every customer, not just the conflicting ones -- one all-null customer
-    # anywhere in the file killed the whole run.
-    #
-    # Dropping nulls before the groupby means such a customer never enters the
-    # tally at all; map() below then finds no key for it and leaves its email NaN.
-    # Selecting the two columns first keeps this off the full 24-column frame.
     votes = (
         df.loc[df['customer_email'].notna(), ['customer_id', 'customer_email']]
         .groupby(['customer_id', 'customer_email'], sort=False)
@@ -213,10 +186,6 @@ def resolve_customer_email_conflicts(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(name='n_rows')
     )
 
-    # sort=False above leaves votes in order of first appearance, and mergesort is
-    # stable, so a tie is broken by whichever email was seen first in the file.
-    # The default quicksort is not stable, which would leave the winner of a tie up
-    # to sort internals -- two runs over the same input could disagree.
     votes = votes.sort_values('n_rows', ascending=False, kind='mergesort')
 
     tied = votes.groupby('customer_id')['n_rows'].transform('max').eq(votes['n_rows'])
@@ -234,8 +203,6 @@ def resolve_customer_email_conflicts(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     if n_tied:
-        # A tie means majority vote could not actually decide. The pick is stable
-        # but arbitrary, so say so rather than presenting it as a resolved conflict.
         logger.warning(
             f"{n_tied} customer_id(s) had two or more emails tied on the same row "
             "count; kept the one seen first in the file."
@@ -344,12 +311,12 @@ def fill_missing_product_prices(df: pd.DataFrame) -> pd.DataFrame:
 
         before = df[col].isna().sum()
 
-        product_avg = (
+        product_md = (
             df.groupby('product_id')[col]
             .median()
         )
 
-        df[col] = df[col].fillna(df['product_id'].map(product_avg))
+        df[col] = df[col].fillna(df['product_id'].map(product_md))
 
 
         after = df[col].isna().sum()
@@ -512,7 +479,6 @@ def split_into_dimensions_and_facts(df: pd.DataFrame) -> dict[str, pd.DataFrame]
     inventory_keys = ["inventory_snapshot_date", "product_id", "branch_id"]
     inventory = df[inventory_keys + ["sale_date", "sale_id", "stock_quantity", "reorder_level"]]
 
-    # groupby silently drops rows with a NaN/NaT key, so count them before it happens
     n_unkeyed = int(inventory[inventory_keys].isna().any(axis=1).sum())
     if n_unkeyed > 0:
         logger.warning(

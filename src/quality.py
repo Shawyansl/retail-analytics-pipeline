@@ -39,12 +39,7 @@ def check_dimension_uniqueness(tables: dict) -> tuple[list[dict], pd.DataFrame]:
 
         results.append(my_dict)
 
-        # keep="first": drop only the surplus copies, never the whole key. A dimension row
-        #t duplicates when a descriptive attribute drifts across the source rows for one id
-        # (a product's unit_price changes, a customer moves ciy) -- dropping every copy
-        # would delete the key from the dimension, and check_foreign_keys would then delete
-        # every fact row that references it. Losing an attribute revision is recoverable;
-        # losing the entity plus all its facts is not.
+
         surplus_mask = df[pk_col].duplicated(keep="first")
         if surplus_mask.any():
             rejected_df = df.loc[surplus_mask].copy()
@@ -92,11 +87,7 @@ def check_fact_pk(tables: dict) -> tuple[list[dict], pd.DataFrame]:
 
         results.append(my_dict)
 
-        # keep="first" here as well, but for a different reason than the dimensions above:
-        # a fact row IS the measurement, so dropping every copy of a duplicated sale_id
-        # discards a real sale on top of the bogus one. transform.quarantine_invalid_sales
-        # already rejects genuinely ambiguous duplicate sale_ids with both copies; anything
-        # still duplicated at this point is a survivor worth keeping one of.
+
         surplus_mask = df.duplicated(subset=pk_cols, keep="first")
         if surplus_mask.any():
             rejected_df = df.loc[surplus_mask].copy()

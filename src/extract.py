@@ -68,7 +68,10 @@ def extract_data(file_path:str):
         logger.warning(f"Missing required columns: {missing_columns}")
     else:
         logger.info("All required columns are present.")
-        
+
+    """
+    collect some information
+    """ 
     n_rows, n_cols = df.shape
     logger.info(f"Row count: {n_rows:,}")
     logger.info(f"Column count: {n_cols}")
@@ -84,14 +87,11 @@ def extract_data(file_path:str):
  
     duplicate_count = df.duplicated().sum()
     logger.info(f"Duplicate rows found: {duplicate_count:,}")
- 
-    logger.info(f"Basic numeric statistics:\n{df.describe()}")
+
+    describe_info = df.describe().to_string()
+    logger.info(f"Basic numeric statistics:\n{describe_info}")
  
     logger.info("Data extraction completed successfully.")
 
     return df
        
-
-if __name__ == "__main__":
-    file_path = "../data/raw/retail_transactions_denormalized.csv"
-    df = extract_data(file_path)
